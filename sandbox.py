@@ -108,7 +108,6 @@ def get_polyline_dist(polyline_points, frame, box_centroid_x, box_centroid_y, bo
     render_text(f'({'T' if dist_is_outside_box else 'F'}|{'T' if dist_is_half_box else 'F'}|{'T' if dist_is_quart_box else 'F'})|is stop:{object_is_stationary}', bottom_left_box, frame)
 
     return distance, delta, dist_is_outside_box, dist_is_half_box, dist_is_quart_box, object_is_stationary
-    # cv2.line(frame, (box_top_left_x,(box_top_left_y+2)), (int(box_top_left_x+box_w), int(box_top_left_y+2)), (0, 255, 0) , 2)
 
 
 def read_frames(model_obj, CLASS_NAMES, only_classes):
