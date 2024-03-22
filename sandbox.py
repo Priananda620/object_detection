@@ -15,7 +15,6 @@ from ultralytics import NAS
 from ultralytics.solutions import object_counter
 from ultralytics.solutions import speed_estimation
 
-# STREAM_URL = "https://cctv.molecool.id/Cempaka-Putih-Timur-013/video.m3u8?token=fc7ccef3f3fa41c2644c95bbde892519795a1ec9-caaadc601326886935f88e07a2c9b193-1709180184-1709176584"
 FPS=20
 MAX_QUEUE_SIZE = FPS*3
 FRAME_DISPLAY_INTERVAL = 1 / FPS
