@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>onnx model inference</title>
+    <link href="https://vjs.zencdn.net/7.14.3/video-js.css" rel="stylesheet">
+    <!-- <script src="js/main.js"></script> -->
+</head>
+<body>
+    <h1>onnx model inference</h1>
+    
+    <video id="videoPlayer" class="video-js vjs-default-skin" preload="none" crossorigin="true" controls width="640" height="268" controls>
+    </video>
+    <canvas id="canvas" width="640" height="360" style="width: 640px;"></canvas>
+    <button id="playButton">Play</button>
+
+    <input type="file" id="uploadInput">
+    <!-- see also advanced usage of importing ONNX Runtime Web: -->
+    <!-- https://github.com/microsoft/onnxruntime-inference-examples/tree/main/js/importing_onnxruntime-web -->
+
+    <!-- import ONNXRuntime Web from CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg/dist/ffmpeg.min.js"></script>
+
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/video.js/5.10.2/alt/video-js-cdn.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/video.js/5.10.2/video.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/videojs-contrib-hls/3.0.2/videojs-contrib-hls.js"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.1.0/jquery.min.js"></script>
+    <script>
+        class FlusonicToken {
+            constructor(cctvFlusonic, lifetimeHr) {
+                this.KEY = "Jelajahdata_01";
+                this.CCTV_FLUSONIC = cctvFlusonic;
+                this.LIFETIME = 3600 * (24 * lifetimeHr);
+            }
+
+            async getTokenizedUrl() {
+                const key = this.KEY;
+                const lifetime = this.LIFETIME;
+                const stream = this.CCTV_FLUSONIC;
+
+                const desync = 300;
+                const startTime = Math.floor(Date.now() / 1000) - desync;
+                const endTime = startTime + lifetime;
+                const salt = this.generateSalt();
+                const hashStr = stream + startTime + endTime + key + salt;
+                const token = await this.hashSHA1(hashStr) + '-' + salt + '-' + endTime + '-' + startTime;
+                const url = 'https://cctv.molecool.id/' + stream + '/video.m3u8?token=' + token;
+
+                return url;
+            }
+
+            async hashSHA1(input) {
+                const msgUint8 = new TextEncoder().encode(input);
+                const hashBuffer = await crypto.subtle.digest('SHA-1', msgUint8);
+                const hashArray = Array.from(new Uint8Array(hashBuffer));
+                const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+                return hashHex;
+            }
+
+            generateSalt() {
+                const saltArray = new Uint8Array(16);
+                crypto.getRandomValues(saltArray);
+                return Array.from(saltArray).map(b => ('0' + b.toString(16)).slice(-2)).join('');
+            }
+        }
+
+        // use an async context to call onnxruntime functions.
+        const coco_yolo_classes = [
+            'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
+            'traffic light', 'fire hydrant', 'stop sign', 'parking meter', 'bench', 'bird', 'cat', 'dog', 'horse',
+            'sheep', 'cow', 'elephant', 'bear', 'zebra', 'giraffe', 'backpack', 'umbrella', 'handbag', 'tie', 'suitcase',
+            'frisbee', 'skis', 'snowboard', 'sports ball', 'kite', 'baseball bat', 'baseball glove', 'skateboard',
+            'surfboard', 'tennis racket', 'bottle', 'wine glass', 'cup', 'fork', 'knife', 'spoon', 'bowl', 'banana', 'apple',
+            'sandwich', 'orange', 'broccoli', 'carrot', 'hot dog', 'pizza', 'donut', 'cake', 'chair', 'couch', 'potted plant',
+            'bed', 'dining table', 'toilet', 'tv', 'laptop', 'mouse', 'remote', 'keyboard', 'cell phone', 'microwave', 'oven',
+            'toaster', 'sink', 'refrigerator', 'book', 'clock', 'vase', 'scissors', 'teddy bear', 'hair drier', 'toothbrush'
+        ];
+        const visdrone_yolo_classes = [
+            'pedestrian', 'people', 'bicycle', 'car', 'van', 'truck', 'tricycle', 'awning-tricycle', 'bus', 'motor'
+        ]
+        const MODEL_CLASSES = visdrone_yolo_classes
+        const CLASS_LENGTH = MODEL_CLASSES.length
+        const MODEL_NAME = "yolov8_best_visdrone.onnx"
+        function iou(box1,box2) {
+            return intersection(box1,box2)/union(box1,box2);
+        }
+
+        const YOLOv8_COL_LEN = 8400
+        const TRANSPOSED_LEN = 4 * CLASS_LENGTH * YOLOv8_COL_LEN
+
+        // 8400*row_index+column_index
+
+
+        /**
+         * Function calculates union area of two boxes.
+         *     :param box1: First box in format [x1,y1,x2,y2,object_class,probability]
+         *     :param box2: Second box in format [x1,y1,x2,y2,object_class,probability]
+         *     :return: Area of the boxes union as a float number
+         * @param box1 First box in format [x1,y1,x2,y2,object_class,probability]
+         * @param box2 Second box in format [x1,y1,x2,y2,object_class,probability]
+         * @returns Area of the boxes union as a float number
+         */
+        function union(box1,box2) {
+            const [box1_x1,box1_y1,box1_x2,box1_y2] = box1;
+            const [box2_x1,box2_y1,box2_x2,box2_y2] = box2;
+            const box1_area = (box1_x2-box1_x1)*(box1_y2-box1_y1)
+            const box2_area = (box2_x2-box2_x1)*(box2_y2-box2_y1)
+            return box1_area + box2_area - intersection(box1,box2)
+        }
+
+        /**
+         * Function calculates intersection area of two boxes
+         * @param box1 First box in format [x1,y1,x2,y2,object_class,probability]
+         * @param box2 Second box in format [x1,y1,x2,y2,object_class,probability]
+         * @returns Area of intersection of the boxes as a float number
+         */
+        function intersection(box1,box2) {
+            const [box1_x1,box1_y1,box1_x2,box1_y2] = box1;
+            const [box2_x1,box2_y1,box2_x2,box2_y2] = box2;
+            const x1 = Math.max(box1_x1,box2_x1);
+            const y1 = Math.max(box1_y1,box2_y1);
+            const x2 = Math.min(box1_x2,box2_x2);
+            const y2 = Math.min(box1_y2,box2_y2);
+            return (x2-x1)*(y2-y1)
+        }
+        
+        async function main() {
+            try {
+                // create a new session and load the specific model.
+                //
+                // the model in this example contains a single MatMul node
+                // it has 2 inputs: 'a'(float32, 3x4) and 'b'(float32, 4x3)
+                // it has 1 output: 'c'(float32, 3x3)
+                const session = await ort.InferenceSession.create('./test.onnx');
+
+                // prepare inputs. a tensor need its corresponding TypedArray as data
+                const dataA = Float32Array.from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+                const dataB = Float32Array.from([10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120]);
+                const tensorA = new ort.Tensor('float32', dataA, [3, 4]);
+                const tensorB = new ort.Tensor('float32', dataB, [4, 3]);
+
+                // prepare feeds. use model input names as keys.
+                const feeds = { a: tensorA, b: tensorB };
+
+                // feed inputs and run
+                const results = await session.run(feeds);
+
+                // read from results
+                const dataC = results.c.data;
+                document.write(`data of result tensor 'c': ${dataC}`);
+
+            } catch (e) {
+                document.write(`failed to inference ONNX model: ${e}.`);
+            }
+        }
+
+        async function detectObjects(imageData, session) {
+            // Load the YOLO model
+            
+            // await session.loadModel('yolov8_best_visdrone.onnx');
+
+            // Preprocess input data (assuming imageData is an HTMLCanvasElement)
+            const inputTensor = new Float32Array(imageData.width * imageData.height * 3);
+            // Fill inputTensor with normalized pixel values from imageData
+
+            // Perform inference
+            const output = await session.run([inputTensor]);
+
+            // Process the output to extract bounding boxes and class probabilities
+            const detections = processOutput(output);
+
+            // Display the detections (e.g., draw bounding boxes on canvas)
+            drawDetections(imageData, detections);
+        }
+
+        function processOutput(output) {
+            // Process the output tensor to extract bounding boxes and class probabilities
+            // Example implementation depends on the format of the YOLO model's output tensor
+            return output;
+        }
+
+        // Function to draw bounding boxes on the canvas
+        function drawDetections(imageData, detections) {
+            console.log(detections)
+        }
+
+        function loadImage(url) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => resolve(img);
+                img.onerror = reject;
+                img.src = url;
+            });
+        }
+
+
+        /////////////////////////
+
+        async function prepare_input(inputData) {
+            return new Promise(resolve => {
+                if (inputData instanceof Blob) {
+                    // Handle image file input
+                    const img = new Image();
+                    img.src = URL.createObjectURL(inputData);
+                    img.onload = () => {
+                        const [img_width, img_height] = [img.width, img.height];
+                        const canvas = document.createElement("canvas");
+                        canvas.width = 640;
+                        canvas.height = 640;
+                        const context = canvas.getContext("2d");
+                        context.drawImage(img, 0, 0, 640, 640);
+                        const imgData = context.getImageData(0, 0, 640, 640);
+                        const pixels = imgData.data;
+
+                        const red = [], green = [], blue = [];
+                        for (let index = 0; index < pixels.length; index += 4) {
+                            red.push(pixels[index] / 255.0);
+                            green.push(pixels[index + 1] / 255.0);
+                            blue.push(pixels[index + 2] / 255.0);
+                        }
+                        const input = [...red, ...green, ...blue];
+                        resolve([input, img_width, img_height]);
+                    };
+                } else if (inputData instanceof HTMLVideoElement) {
+                    // Handle video element input
+                    const videoElement = inputData;
+                    const [img_width, img_height] = [videoElement.videoWidth, videoElement.videoHeight];
+                    const canvas = document.createElement("canvas");
+                    canvas.width = 640; // Adjust as needed
+                    canvas.height = 640; // Adjust as needed
+                    const context = canvas.getContext("2d");
+                    context.drawImage(videoElement, 0, 0, 640, 640);
+                    const imgData = context.getImageData(0, 0, 640, 640);
+                    const pixels = imgData.data;
+
+                    const red = [], green = [], blue = [];
+                    for (let index = 0; index < pixels.length; index += 4) {
+                        red.push(pixels[index] / 255.0);
+                        green.push(pixels[index + 1] / 255.0);
+                        blue.push(pixels[index + 2] / 255.0);
+                    }
+                    const input = [...red, ...green, ...blue];
+                    resolve([input, img_width, img_height]);
+                } else {
+                    // Invalid input type
+                    reject(new Error("Invalid input type. Expected Blob or HTMLVideoElement."));
+                }
+            });
+        }
+        ////////////////////
+
+        // async function prepare_input(buf) {
+        //     return new Promise(resolve => {
+        //         const img = new Image();
+        //         img.src = URL.createObjectURL(buf);
+        //         img.onload = () => {
+        //             const [img_width,img_height] = [img.width, img.height]
+        //             const canvas = document.createElement("canvas");
+        //             canvas.width = 640;
+        //             canvas.height = 640;
+        //             const context = canvas.getContext("2d");
+        //             context.drawImage(img,0,0,640,640);
+        //             const imgData = context.getImageData(0,0,640,640);
+        //             const pixels = imgData.data;
+
+        //             const red = [], green = [], blue = [];
+        //             for (let index=0; index<pixels.length; index+=4) {
+        //                 red.push(pixels[index]/255.0);
+        //                 green.push(pixels[index+1]/255.0);
+        //                 blue.push(pixels[index+2]/255.0);
+        //             }
+        //             const input = [...red, ...green, ...blue];
+        //             resolve([input, img_width, img_height])
+        //         }
+        //     })
+        // }
+
+        function process_output(output, img_width, img_height) {
+            let boxes = [];
+            for (let index=0;index<8400;index++) {
+                const [class_id,prob] = [...Array(CLASS_LENGTH).keys()]
+                    .map(col => [col, output[8400*(col+4)+index]])
+                    .reduce((accum, item) => item[1]>accum[1] ? item : accum,[0,0]);
+
+                if (prob < 0.2) {
+                    continue;
+                }
+
+                const label = MODEL_CLASSES[class_id];
+                const xc = output[8400*0+index];
+                const yc = output[8400*1+index];
+                const w = output[8400*2+index];
+                const h = output[8400*3+index];
+                
+                const x1 = (xc-w/2)/640*img_width;
+                const y1 = (yc-h/2)/640*img_height;
+                const x2 = (xc+w/2)/640*img_width;
+                const y2 = (yc+h/2)/640*img_height;
+                boxes.push([x1,y1,x2,y2,label,prob]);
+            }
+
+            console.log(boxes)
+
+            boxes = boxes.sort((box1,box2) => box2[5]-box1[5])
+            const result = [];
+            while (boxes.length>0) {
+                result.push(boxes[0]);
+                boxes = boxes.filter(box => iou(boxes[0],box)<0.7);
+            }
+            return result;
+        }
+
+        async function detect_objects_on_image(buf) {
+            console.log("RUNNING INFERENCE...")
+            const [input,img_width,img_height] = await prepare_input(buf);
+            const output = await run_model(input, MODEL_NAME);
+            return process_output(output,img_width,img_height);
+        }
+
+
+        //////////////////////////
+
+        function draw_image_and_boxes(inputData, boxes, canvas) {
+            const img = new Image();
+            if (inputData instanceof Blob) {
+                // Handle image file input
+                img.src = URL.createObjectURL(inputData);
+                img.onload = () => {
+                    // const canvas = document.createElement("canvas");
+                    canvas.width = img.width;
+                    canvas.height = img.height;
+                    const ctx = canvas.getContext("2d");
+                    ctx.drawImage(img, 0, 0);
+                    draw_boxes(ctx, boxes);
+                };
+            } else if (inputData instanceof HTMLVideoElement) {
+                // Handle video element input
+                const videoElement = inputData;
+                // const canvas = document.createElement("canvas");
+                canvas.width = videoElement.videoWidth; // Adjust as needed
+                canvas.height = videoElement.videoHeight; // Adjust as needed
+                const ctx = canvas.getContext("2d");
+                ctx.drawImage(videoElement, 0, 0, canvas.width, canvas.height);
+                draw_boxes(ctx, boxes);
+            } else {
+                console.error("Invalid input type. Expected Blob or HTMLVideoElement.");
+            }
+        }
+
+        function draw_boxes(ctx, boxes) {
+            ctx.strokeStyle = "#00FF00";
+            ctx.lineWidth = 3;
+            ctx.font = "18px serif";
+            boxes.forEach(([x1, y1, x2, y2, label]) => {
+                ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+                ctx.fillStyle = "#00ff00";
+                const width = ctx.measureText(label).width;
+                ctx.fillRect(x1, y1, width + 10, 25);
+                ctx.fillStyle = "#000000";
+                ctx.fillText(label, x1, y1 + 18);
+            });
+        }
+
+        // function draw_image_and_boxes(file,boxes) {
+        //     const img = new Image()
+        //     img.src = URL.createObjectURL(file);
+        //     img.onload = () => {
+        //         const canvas = document.querySelector("canvas");
+        //         canvas.width = img.width;
+        //         canvas.height = img.height;
+        //         const ctx = canvas.getContext("2d");
+        //         ctx.drawImage(img,0,0);
+        //         ctx.strokeStyle = "#00FF00";
+        //         ctx.lineWidth = 3;
+        //         ctx.font = "18px serif";
+        //         boxes.forEach(([x1,y1,x2,y2,label]) => {
+        //             ctx.strokeRect(x1,y1,x2-x1,y2-y1);
+        //             ctx.fillStyle = "#00ff00";
+        //             const width = ctx.measureText(label).width;
+        //             ctx.fillRect(x1,y1,width+10,25);
+        //             ctx.fillStyle = "#000000";
+        //             ctx.fillText(label, x1, y1+18);
+        //         });
+        //     }
+        // }
+
+        async function run_model(input, modelName) {
+            const model = await ort.InferenceSession.create(modelName);
+            input = new ort.Tensor(Float32Array.from(input),[1, 3, 640, 640]);
+            const outputs = await model.run({images:input});
+            console.log("on model "+modelName)
+            console.log(outputs["output0"].data)
+            return outputs["output0"].data;
+        }
+
+        const videoPlayer = $('#videoPlayer')
+        const canvas = $('#canvas')
+        const play = $('#playButton')
+
+
+        async function run(){
+            const input = document.getElementById("uploadInput");
+            input.addEventListener("change",async(event) => {
+                const boxes = await detect_objects_on_image(event.target.files[0]);
+                console.log(boxes)
+                draw_image_and_boxes(event.target.files[0],boxes, document.querySelector("canvas"));
+            })
+
+            // FFMPEG
+            let cctv_stream
+            const flusonicToken = new FlusonicToken('JPO-Merdeka-Barat-006', 24);
+            flusonicToken.getTokenizedUrl()
+                .then(tokenizedUrl => {
+                    cctv_stream = tokenizedUrl;
+                    console.log(cctv_stream);
+                })
+                .catch(error => {
+                    console.error('Error generating tokenized URL:', error);
+                });
+
+            play.on("click", function() {
+                
+                videoPlayer.html("<source src='"+ cctv_stream +"' type='application/x-mpegURL'>");
+                var ply = videojs("videoPlayer");
+                ply.play();
+            
+                (() => {
+                    const videoPlayerDOM = videoPlayer.get(0);
+
+                    let isPlaying = false;
+                    let isBuffering = false;
+                    let shouldContinue = false;
+                    let inferenceOn = 0
+                    let inferenceIsRunning = false
+
+                    videoPlayerDOM.addEventListener('play', () => {
+                        isPlaying = true;
+                        iterateFrames();
+                    });
+
+                    // Event listener for video paused
+                    videoPlayerDOM.addEventListener('pause', () => {
+                        isPlaying = false;
+                    });
+
+                    // Event listener for video ended
+                    videoPlayerDOM.addEventListener('ended', () => {
+                        isPlaying = false;
+                    });
+
+                    // Event listener for video waiting (buffering)
+                    videoPlayerDOM.addEventListener('waiting', () => {
+                        isBuffering = true;
+                    });
+
+                    // Event listener for video playing (buffered)
+                    videoPlayerDOM.addEventListener('playing', () => {
+                        isBuffering = false;
+                        if (shouldContinue) {
+                            iterateFrames();
+                        }
+                    });
+
+                    async function iterateFrames() {
+                        if (!isPlaying) {
+                            return;
+                        }
+
+                        if (isBuffering) {
+                            shouldContinue = true;
+                            return;
+                        }
+
+                        inferenceOn++
+
+                        const currentTime = videoPlayerDOM.currentTime;
+
+                        // const canvas = document.querySelector("canvas");
+                        // const ctx = canvas.getContext("2d");
+                        // ctx.drawImage(videoPlayerDOM, 0, 0, canvas.width, canvas.height)
+                        console.log(inferenceOn)
+                        if(inferenceOn == 20){
+                            // setTimeout(async () => {
+                            inferenceIsRunning = true
+                            const boxes = await detect_objects_on_image(videoPlayerDOM).then((boxes) => {
+                                console.log(boxes)
+                                draw_image_and_boxes(videoPlayerDOM, boxes, document.querySelector("canvas"));
+                                inferenceOn = 0
+                                inferenceIsRunning = false
+                            });
+                            
+                            // }, 10000);
+                        }
+
+                        if(!inferenceIsRunning){
+                            requestAnimationFrame(() => {
+                                if (currentTime >= videoPlayerDOM.duration) {
+                                    // videoPlayerDOM.pause();
+                                    isPlaying = false;
+                                    console.log('End of video reached.');
+                                    return;
+                                }
+
+                                // videoPlayerDOM.currentTime += 1 / 60;
+
+                                iterateFrames();
+                            });
+                        }
+                        
+                    }
+                })();
+
+            });
+            
+        }
+        $(document).ready(function() {
+            run()
+        })
+
+        // main();
+    </script>
+</body>
+</html>
+</html>
